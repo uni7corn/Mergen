@@ -1,5 +1,6 @@
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, MemorySize, Mnemonic, NasmFormatter, OpKind, Register, SpecializedFormatter, SpecializedFormatterTraitOptions};
-use std::slice;
+#![allow(non_snake_case)]
+
+use iced_x86::{Decoder, DecoderOptions, Instruction, OpKind, Register, SpecializedFormatter, SpecializedFormatterTraitOptions};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use memoffset::offset_of;
@@ -22,10 +23,12 @@ enum OperandType {
   Register16,
   Register32,
   Register64,
+  Register128,
   Memory8,
   Memory16,
   Memory32,
   Memory64,
+  Memory128,
   Immediate8,
   Immediate8_2nd, // enter/exit
   Immediate16,
@@ -104,18 +107,28 @@ fn is_relative_jump(instr: &Instruction) -> bool {
     false
 }
 
+fn has_near_branch(instr: &Instruction) -> bool {
+    for i in 0..5 {
+        match instr.op_kind(i) {
+            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn convert_type_to_mergen(inst : &Instruction,  index : u32) -> OperandType {
     
     match inst.op_kind(index) {
         OpKind::Register => {
             match inst.op_register(index).size() {
                 1 => { return OperandType::Register8; },
-                2 => {return OperandType::Register16},
-                4 => {return OperandType::Register32},
-                8 => {return OperandType::Register64},
-                // 16 => OperandType::Register128,
-                0 => {return OperandType::Invalid},
-                _ => {panic!("Unhandled register size: {}", inst.op_register(index).size());},
+                2 => { return OperandType::Register16; },
+                4 => { return OperandType::Register32; },
+                8 => { return OperandType::Register64; },
+                16 => { return OperandType::Register128; },
+                0 => { return OperandType::Invalid; },
+                _ => { panic!("Unhandled register size: {}", inst.op_register(index).size()); },
             }
         },
         OpKind::Immediate8 => { return OperandType::Immediate8 },
@@ -151,12 +164,12 @@ fn convert_type_to_mergen(inst : &Instruction,  index : u32) -> OperandType {
                     */
                     return OperandType::Invalid;
                 },
-                1 => {return OperandType::Memory8},
-                2 => {return OperandType::Memory16},
-                4 => {return OperandType::Memory32},
-                8 => {return OperandType::Memory64},
-                // 16 => OperandType::Memory128
-                _ => {println!("{:?}", inst.memory_size());panic!("Unhandled memory size: {}", inst.memory_size().size())},
+                1 => { return OperandType::Memory8; },
+                2 => { return OperandType::Memory16; },
+                4 => { return OperandType::Memory32; },
+                8 => { return OperandType::Memory64; },
+                16 => { return OperandType::Memory128; },
+                _ => { println!("{:?}", inst.memory_size()); panic!("Unhandled memory size: {}", inst.memory_size().size()); },
             }
         },
 
@@ -200,9 +213,10 @@ pub extern "C" fn disas(
     let is_rel = is_relative_jump(&instr);
     let has_imm64 = has_64bit_immediate(&instr);
 
-    // Compute immediate in one branch sequence
-    let immediate = if is_rel {
-        // relative jump: displacement minus instruction length
+    // Compute immediate: only near branches use displacement-based value;
+    // RIP-relative memory instructions must use the actual immediate operand.
+    let is_branch = has_near_branch(&instr);
+    let immediate = if is_branch {
         disp64.wrapping_sub(instr_len)
     } else if has_imm64 {
         instr.immediate64() as u64
@@ -285,7 +299,8 @@ pub extern "C" fn disas2(
     let is_rel = is_relative_jump(&instr);
     let has_imm64 = has_64bit_immediate(&instr);
 
-    let immediate = if is_rel {
+    let is_branch = has_near_branch(&instr);
+    let immediate = if is_branch {
         disp64.wrapping_sub(instr_len)
     } else if has_imm64 {
         instr.immediate64() as u64
